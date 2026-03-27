@@ -1,0 +1,13 @@
+[package]
+name = "dataforge-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = "2"
+bytes = "1"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+tracing = "0.1"

@@ -1,0 +1,18 @@
+[package]
+name = "dataforge-python"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "bluesky_dataforge"
+crate-type = ["cdylib"]
+
+[dependencies]
+dataforge-core = { path = "../dataforge-core" }
+dataforge-engine = { path = "../dataforge-engine" }
+pyo3 = { version = "0.24", features = ["extension-module", "abi3-py310"] }
+serde_json = "1"
+parking_lot = "0.12"
+tracing = "0.1"
