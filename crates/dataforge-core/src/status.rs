@@ -3,6 +3,8 @@ use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex};
 
+type StatusCallback = Box<dyn FnOnce(bool) + Send>;
+
 use crate::error::{DaqError, DaqResult};
 
 /// Python-independent status core for tracking asynchronous operation completion.
@@ -15,7 +17,7 @@ pub struct StatusCore {
     success: AtomicBool,
     notify: Condvar,
     mutex: Mutex<()>,
-    callbacks: Mutex<Vec<Box<dyn FnOnce(bool) + Send>>>,
+    callbacks: Mutex<Vec<StatusCallback>>,
 }
 
 impl StatusCore {

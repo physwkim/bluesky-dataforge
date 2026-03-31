@@ -66,7 +66,7 @@ impl ForgeSubscriber {
         let writer: Box<dyn DocumentWriter> = match format {
             "jsonl" | "json" => Box::new(
                 JsonLinesWriter::new(filepath)
-                    .map_err(|e| PyRuntimeError::new_err(e))?,
+                    .map_err(PyRuntimeError::new_err)?,
             ),
             _ => {
                 return Err(PyRuntimeError::new_err(format!(
@@ -93,7 +93,7 @@ impl ForgeSubscriber {
             writer
                 .lock()
                 .write(&doc_name, &json_val)
-                .map_err(|e| pyo3::exceptions::PyIOError::new_err(e))
+                .map_err(pyo3::exceptions::PyIOError::new_err)
         })
     }
 
@@ -102,7 +102,7 @@ impl ForgeSubscriber {
         self.writer
             .lock()
             .close()
-            .map_err(|e| PyRuntimeError::new_err(e))
+            .map_err(PyRuntimeError::new_err)
     }
 
     fn __repr__(&self) -> String {

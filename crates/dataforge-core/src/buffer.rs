@@ -95,7 +95,7 @@ impl Buffer {
     pub fn freeze(self) -> Bytes {
         let start = self.data_start;
         let end = self.data_end;
-        Bytes::from(self.inner.freeze()).slice(start..end)
+        self.inner.freeze().slice(start..end)
     }
 }
 
