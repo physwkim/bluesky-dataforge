@@ -64,7 +64,7 @@ impl AsyncWriter {
 
         let file = File::create(&path)
             .map_err(|e| PyRuntimeError::new_err(format!("cannot create {path}: {e}")))?;
-        let mut writer = BufWriter::with_capacity(1024 * 1024, file); // 1MB buffer
+        let mut writer = BufWriter::with_capacity(4 * 1024 * 1024, file); // 4MB buffer
 
         let (tx, rx) = mpsc::channel::<WriterMsg>();
         let pending = Arc::new(AtomicUsize::new(0));
