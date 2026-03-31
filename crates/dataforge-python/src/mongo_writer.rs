@@ -171,8 +171,8 @@ impl AsyncMongoWriter {
         let rx = Mutex::new(reply_rx);
         let ok = py.allow_threads(|| rx.lock().recv().is_ok());
         if ok {
-            // Check if any errors accumulated during writes
-            let errs = self.errors.lock();
+            // Drain errors accumulated since last flush
+            let errs: Vec<String> = self.errors.lock().drain(..).collect();
             if errs.is_empty() {
                 Ok(())
             } else {

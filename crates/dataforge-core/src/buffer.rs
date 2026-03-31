@@ -6,7 +6,6 @@ use crate::error::{DaqError, DaqResult};
 #[derive(Debug, Clone)]
 pub struct Buffer {
     inner: BytesMut,
-    head_room: usize,
     data_start: usize,
     data_end: usize,
 }
@@ -20,7 +19,6 @@ impl Buffer {
         inner.resize(capacity, 0);
         Self {
             inner,
-            head_room,
             data_start: head_room,
             data_end: head_room,
         }
@@ -32,7 +30,6 @@ impl Buffer {
         inner.extend_from_slice(data);
         Self {
             inner,
-            head_room: 0,
             data_start: 0,
             data_end: data.len(),
         }

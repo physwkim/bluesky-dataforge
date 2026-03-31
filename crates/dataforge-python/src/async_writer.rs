@@ -177,7 +177,7 @@ impl AsyncWriter {
         let rx = Mutex::new(reply_rx);
         let result = py.allow_threads(|| rx.lock().recv().is_ok());
         if result {
-            let errs = self.errors.lock();
+            let errs: Vec<String> = self.errors.lock().drain(..).collect();
             if errs.is_empty() {
                 Ok(())
             } else {
