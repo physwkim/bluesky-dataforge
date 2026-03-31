@@ -1,6 +1,8 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::sync::mpsc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
 use parking_lot::Mutex;
@@ -46,7 +48,10 @@ pub struct AsyncWriter {
     tx: Mutex<Option<mpsc::Sender<WriterMsg>>>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     filepath: String,
-    pending: Mutex<usize>,
+    /// Number of items queued minus items processed.
+    pending: Arc<AtomicUsize>,
+    /// Errors from background write operations.
+    errors: Arc<Mutex<Vec<String>>>,
 }
 
 #[pymethods]
@@ -62,14 +67,21 @@ impl AsyncWriter {
         let mut writer = BufWriter::new(file);
 
         let (tx, rx) = mpsc::channel::<WriterMsg>();
+        let pending = Arc::new(AtomicUsize::new(0));
+        let pending_ref = pending.clone();
+        let errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let errors_ref = errors.clone();
 
         let worker = thread::spawn(move || {
             while let Ok(msg) = rx.recv() {
                 match msg {
                     WriterMsg::Data(item) => {
                         if let Err(e) = write_item(&mut writer, &item, &fmt) {
-                            eprintln!("[AsyncWriter] write error: {e}");
+                            let msg = format!("write error: {e}");
+                            eprintln!("[AsyncWriter] {msg}");
+                            errors_ref.lock().push(msg);
                         }
+                        pending_ref.fetch_sub(1, Ordering::Relaxed);
                     }
                     WriterMsg::Flush(token) => {
                         let _ = writer.flush();
@@ -87,7 +99,8 @@ impl AsyncWriter {
             tx: Mutex::new(Some(tx)),
             worker: Mutex::new(Some(worker)),
             filepath: path,
-            pending: Mutex::new(0),
+            pending,
+            errors,
         })
     }
 
@@ -105,7 +118,7 @@ impl AsyncWriter {
     #[pyo3(signature = (data, metadata=None))]
     fn enqueue(
         &self,
-        py: Python<'_>,
+        _py: Python<'_>,
         data: &Bound<'_, pyo3::PyAny>,
         metadata: Option<&Bound<'_, pyo3::PyAny>>,
     ) -> PyResult<()> {
@@ -139,7 +152,7 @@ impl AsyncWriter {
             sender
                 .send(WriterMsg::Data(item))
                 .map_err(|_| PyRuntimeError::new_err("writer thread gone"))?;
-            *self.pending.lock() += 1;
+            self.pending.fetch_add(1, Ordering::Relaxed);
         } else {
             return Err(PyRuntimeError::new_err("writer is closed"));
         }
@@ -156,18 +169,26 @@ impl AsyncWriter {
                 .send(WriterMsg::Flush(FlushToken { reply: reply_tx }))
                 .map_err(|_| PyRuntimeError::new_err("writer thread gone"))?;
         } else {
+            // Writer already closed — nothing to flush
             return Ok(());
         }
         drop(tx);
 
-        // Release GIL while waiting
-        // Wrap in Mutex to satisfy Sync bound for allow_threads
         let rx = Mutex::new(reply_rx);
         let result = py.allow_threads(|| rx.lock().recv().is_ok());
         if result {
-            Ok(())
+            let errs = self.errors.lock();
+            if errs.is_empty() {
+                Ok(())
+            } else {
+                let msg = errs.join("; ");
+                Err(PyRuntimeError::new_err(format!(
+                    "flush completed but {} write(s) failed: {msg}",
+                    errs.len()
+                )))
+            }
         } else {
-            Err(PyRuntimeError::new_err("flush failed"))
+            Err(PyRuntimeError::new_err("flush failed: worker thread gone"))
         }
     }
 
@@ -186,10 +207,10 @@ impl AsyncWriter {
         Ok(())
     }
 
-    /// Number of pending writes in the queue.
+    /// Number of items waiting to be written (enqueued minus processed).
     #[getter]
     fn pending(&self) -> usize {
-        *self.pending.lock()
+        self.pending.load(Ordering::Relaxed)
     }
 
     fn __repr__(&self) -> String {

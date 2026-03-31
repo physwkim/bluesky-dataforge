@@ -1,10 +1,10 @@
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 
 use parking_lot::Mutex;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
 
 use crate::convert::py_to_json;
 
@@ -16,7 +16,7 @@ enum MongoMsg {
     },
     /// Flush: wait for all pending inserts to complete
     Flush(mpsc::Sender<()>),
-    /// Batch size hint
+    /// Close the writer
     Close,
 }
 
@@ -38,6 +38,8 @@ pub struct AsyncMongoWriter {
     tx: Mutex<Option<mpsc::Sender<MongoMsg>>>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     batch_size: usize,
+    /// Errors from background insert operations, collected for flush() to report.
+    errors: Arc<Mutex<Vec<String>>>,
 }
 
 #[pymethods]
@@ -60,6 +62,8 @@ impl AsyncMongoWriter {
         let batch = batch_size;
 
         let (tx, rx) = mpsc::channel::<MongoMsg>();
+        let errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let errors_ref = errors.clone();
 
         let worker = thread::spawn(move || {
             // Create tokio runtime for the mongodb async driver
@@ -72,7 +76,7 @@ impl AsyncMongoWriter {
                 let client = match mongodb::Client::with_uri_str(&uri).await {
                     Ok(c) => c,
                     Err(e) => {
-                        eprintln!("[AsyncMongoWriter] connection failed: {e}");
+                        errors_ref.lock().push(format!("connection failed: {e}"));
                         return;
                     }
                 };
@@ -92,15 +96,15 @@ impl AsyncMongoWriter {
                             // Flush batch if size reached
                             let total: usize = batches.values().map(|v| v.len()).sum();
                             if total >= batch {
-                                flush_batches(&db, &mut batches).await;
+                                flush_batches(&db, &mut batches, &errors_ref).await;
                             }
                         }
                         MongoMsg::Flush(reply) => {
-                            flush_batches(&db, &mut batches).await;
+                            flush_batches(&db, &mut batches, &errors_ref).await;
                             let _ = reply.send(());
                         }
                         MongoMsg::Close => {
-                            flush_batches(&db, &mut batches).await;
+                            flush_batches(&db, &mut batches, &errors_ref).await;
                             break;
                         }
                     }
@@ -112,6 +116,7 @@ impl AsyncMongoWriter {
             tx: Mutex::new(Some(tx)),
             worker: Mutex::new(Some(worker)),
             batch_size,
+            errors,
         })
     }
 
@@ -157,15 +162,28 @@ impl AsyncMongoWriter {
             sender
                 .send(MongoMsg::Flush(reply_tx))
                 .map_err(|_| PyRuntimeError::new_err("writer thread gone"))?;
+        } else {
+            // Writer already closed — nothing to flush
+            return Ok(());
         }
         drop(tx);
 
         let rx = Mutex::new(reply_rx);
         let ok = py.allow_threads(|| rx.lock().recv().is_ok());
         if ok {
-            Ok(())
+            // Check if any errors accumulated during writes
+            let errs = self.errors.lock();
+            if errs.is_empty() {
+                Ok(())
+            } else {
+                let msg = errs.join("; ");
+                Err(PyRuntimeError::new_err(format!(
+                    "flush completed but {} insert(s) failed: {msg}",
+                    errs.len()
+                )))
+            }
         } else {
-            Err(PyRuntimeError::new_err("flush failed"))
+            Err(PyRuntimeError::new_err("flush failed: worker thread gone"))
         }
     }
 
@@ -193,6 +211,7 @@ impl AsyncMongoWriter {
 async fn flush_batches(
     db: &mongodb::Database,
     batches: &mut std::collections::HashMap<String, Vec<bson::Document>>,
+    errors: &Arc<Mutex<Vec<String>>>,
 ) {
     for (coll_name, docs) in batches.drain() {
         if docs.is_empty() {
@@ -209,7 +228,9 @@ async fn flush_batches(
                 );
             }
             Err(e) => {
-                eprintln!("[AsyncMongoWriter] insert into {coll_name} failed: {e}");
+                let msg = format!("insert into {coll_name} failed ({count} docs): {e}");
+                eprintln!("[AsyncMongoWriter] {msg}");
+                errors.lock().push(msg);
             }
         }
     }
